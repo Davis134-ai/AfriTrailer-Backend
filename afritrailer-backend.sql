@@ -223,11 +223,11 @@ DECLARE
   user_limit INTEGER;
   user_completed INTEGER;
   user_last_reset DATE;
-  is_sunday BOOLEAN;
+  kampala_today DATE;
 BEGIN
-  is_sunday := EXTRACT(DOW FROM CURRENT_DATE) = 0;
+  kampala_today := (NOW() AT TIME ZONE 'Africa/Kampala')::date;
 
-  IF is_sunday THEN
+  IF EXTRACT(DOW FROM kampala_today) = 0 THEN
     RAISE EXCEPTION 'System is closed on Sundays. Please come back tomorrow!';
   END IF;
 
@@ -236,11 +236,11 @@ BEGIN
   FROM profiles
   WHERE id = NEW.user_id;
 
-  IF user_last_reset < CURRENT_DATE THEN
+  IF user_last_reset < kampala_today THEN
     UPDATE profiles
     SET
       tasks_completed_today = 0,
-      last_reset_date = CURRENT_DATE
+      last_reset_date = kampala_today
     WHERE id = NEW.user_id;
 
     user_completed := 0;
@@ -473,8 +473,8 @@ BEGIN
   UPDATE profiles
   SET
     tasks_completed_today = 0,
-    last_reset_date = CURRENT_DATE
-  WHERE last_reset_date < CURRENT_DATE;
+    last_reset_date = (NOW() AT TIME ZONE 'Africa/Kampala')::date
+  WHERE last_reset_date < (NOW() AT TIME ZONE 'Africa/Kampala')::date;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -651,7 +651,7 @@ SELECT
   p.referral_code,
   p.last_reset_date,
   CASE
-    WHEN p.last_reset_date < CURRENT_DATE THEN true
+    WHEN p.last_reset_date < (NOW() AT TIME ZONE 'Africa/Kampala')::date THEN true
     ELSE false
   END as needs_reset,
   CASE
@@ -659,7 +659,7 @@ SELECT
     ELSE false
   END as limit_reached,
   CASE
-    WHEN EXTRACT(DOW FROM CURRENT_DATE) = 0 THEN true
+    WHEN EXTRACT(DOW FROM (NOW() AT TIME ZONE 'Africa/Kampala')::date) = 0 THEN true
     ELSE false
   END as is_sunday,
   tc.reward_per_video,
@@ -734,15 +734,16 @@ INSERT INTO investment_firms (firm_name, progress_percentage, days_until_full) V
 -- 8. SCHEDULED JOBS (pg_cron)
 -- ============================================================================
 
+-- '0 21 * * *' = 21:00 UTC = 00:00 Africa/Kampala (UTC+3, no DST) — true local midnight.
 SELECT cron.schedule(
   'reset-daily-tasks',
-  '0 0 * * *',
+  '0 21 * * *',
   $$SELECT reset_daily_tasks()$$
 );
 
 SELECT cron.schedule(
   'expire-internships',
-  '0 0 * * *',
+  '0 21 * * *',
   $$SELECT expire_internships()$$
 );
 
@@ -807,12 +808,11 @@ SELECT cron.schedule(
 --    an admin panel or server-side function), not the anon/authenticated
 --    client keys.
 --
--- 6. pg_cron jobs run in UTC by default regardless of the Africa/Kampala
---    logic used elsewhere — '0 0 * * *' means midnight UTC (3am Kampala
---    time), not midnight Kampala time. reset_daily_tasks() and
---    expire_internships() will still work correctly since they compare
---    against CURRENT_DATE/NOW(), but the exact moment they run is 3am
---    Kampala time, not midnight. Adjust the cron expression to
---    '0 21 * * *' (9pm UTC = midnight Kampala, UTC+3) if you want it to
---    fire exactly at Kampala midnight.
+-- 6. [FIXED] Sunday closure, daily counter reset (check_daily_limit(),
+--    reset_daily_tasks()), the user_status view, and the pg_cron schedule
+--    all previously used server CURRENT_DATE (UTC on Supabase), which
+--    rolled the day over 3 hours late relative to true Africa/Kampala
+--    midnight. All of the above now explicitly compute
+--    (NOW() AT TIME ZONE 'Africa/Kampala')::date, and the cron jobs run
+--    at 21:00 UTC (= 00:00 Kampala) instead of 00:00 UTC.
 -- ============================================================================
